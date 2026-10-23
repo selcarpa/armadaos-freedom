@@ -22,7 +22,8 @@ elish 的适配状态、硬件调研与构建入口。当前以 Android-only 启
 | 原厂 Android 启动 | **实机验证通过**（ramdisk 字节保留，经 `linux,initrd-*` 传递） |
 | 显示 | **实机验证通过**：原生竖屏 1600×2560 + `CONFIG_KSHIM_UI_ROTATION_CCW=270`（见下节） |
 | 设备信息页 | **实机验证通过**：Board `Mi Pad 5 Pro (elish)`、SoC `SM8250` |
-| 高级启动动作 Recovery / Fastboot / EDL（M1 fix） | Recovery / **Fastboot 实机通过**（PM8150 PON 暖复位 + IMEM）；EDL（9008）为**已知遗留问题**（见下节） |
+| 高级启动动作 Recovery / Fastboot（M1 fix） | **实机验证通过**：PM8150 PON 暖复位 + IMEM `restart_reason`（见下节） |
+| EDL / 9008 | **已知遗留**：菜单项保留，但直接返回“不支持”（`-100`），见下节 |
 | 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
 | 机身 Linux（M2） | 统一内核已重建，`sm8250-xiaomi-elish-{boe,csot}.dtb` 已进产物并含 handoff 适配 |
@@ -46,6 +47,9 @@ elish 的 stock boot.img 是 **header v3**（没有独立 dtb 段），运行时
   与「model 含 `elish`」两个证据，避免把其它 Kona 板误判。
 - 设备信息页因此显示 Board `Mi Pad 5 Pro (elish)`、SoC `SM8250`；Model / Compatible /
   RAM / Framebuffer 仍原样显示 DT 值。
+- 该识别结果同时被 `boot_settings` 接受（`detected_valid()` 已包含
+  `DEVICE_BOARD_ELISH`），因此默认启动项/会话设置可以正常保存；设置页显示板名
+  `Mi Pad 5 Pro`、板级代码 `elish`。
 
 ### 帧缓冲与旋转
 
@@ -56,15 +60,22 @@ elish 的 stock boot.img 是 **header v3**（没有独立 dtb 段），运行时
 - `CONFIG_KSHIM_UI_ROTATION_CCW=270`：LVGL 以 2560×1600 横屏排版，写帧缓冲时旋转
   （`90` 会上下颠倒，已实机排除）。
 - **live scanout 回退**（`CONFIG_KSHIM_SPLASH_LIVE_FALLBACK`，仅 elish 开启）：elish 上
-  `CrSplashRead` 可能“成功”但返回没人扫描的 `cont_splash_region`，因此直接读 SSPP 的
-  `SRC_SIZE/SRC0_ADDR/YSTRIDE/FORMAT`，只要现场缓冲合理就优先采用。
+  `CrSplashRead` 可能“成功”但返回没人扫描的 `cont_splash_region`，因此直接读每个 SSPP 的
+  `SRC_SIZE/SRC0_ADDR/YSTRIDE/FORMAT`，只保留地址、尺寸、stride、格式都合理的缓冲；
+  双 DSI 半宽 split 的两路若共用同一块缓冲，会合并成整屏，逻辑宽度最终取 `stride / bpp`。
+  回退缓冲按非缓存映射，未使用的 splash reservation 复用为 UI scratch。
 
 ### 高级启动动作：Recovery / Fastboot / EDL（M1 fix）
 
 M1 的高级动作要在 Android-only 菜单里直接切换启动模式。elish 的运行时 DT（ABL 现场生成）
 根 compatible 是 `qcom,kona-mtp` + `qcom,kona`，**没有** `qcom,scm` 与
-`qcom,reboot-reason` 节点，因此不能复用四代（Elden）的 SCM + SPMI/SDAM 路径，改用
-**Kona IMEM 协议**（与 mainline `msm-poweroff.c` 一致）：
+`qcom,reboot-reason` 节点，因此不能复用四代（Elden）的 SCM + SPMI/SDAM 路径。实现按根
+compatible 分派（`src/drivers/qcom_reboot.c`）：
+
+- 根 compatible 为 `qcom,kona-mtp`、`qcom,kona` 或 `qcom,sm8250` → **Kona IMEM 布局**（本节）；
+- 其它（Canoe/Sun 等四代板）→ 原有 SCM + SPMI/SDAM 布局，解析/请求代码未改动。
+
+Kona 路径使用与 mainline `msm-poweroff.c` 相同的 IMEM 协议：
 
 | 目标 | 写入位置 | 值 |
 |---|---|---|
@@ -72,44 +83,63 @@ M1 的高级动作要在 Android-only 菜单里直接切换启动模式。elish 
 | Fastboot | IMEM `0x146bf65c`（`restart_reason`） | `0x77665500` |
 | EDL | —（暂不支持） | — |
 
-- 地址来自运行时 DT 的 `qcom,msm-imem-restart_reason` 子节点（`0x146bf65c`）；写入后
-  立即回读校验，校验失败会回滚原值。
+- 地址来自运行时 DT 的 `qcom,msm-imem-restart_reason` 子节点（`0x146bf65c`，经节点的
+  `ranges` 翻译）；写入后立即回读校验，校验失败会回滚原值。
+- TCSR `qcom,pshold`（`0xC264000`）是**可选**节点；缺失时按 PON 不可用处理（`-106`），
+  不会猜测地址。
 
 > **EDL（9008）为已知遗留问题（M1 fix 范围内不解决）**：早期尝试过 IMEM
 > `download_mode` cookie（基址 `+0x00`，属推断）、`dload_type`、SCM 安全下载
 > （`0xc2000110` 参数 `0x50`）与 TCSR 兜底，均未经验证且实机三轮都只重启回 Android。
-> 为避免保留未验证的推测代码，这些实现已全部移除；菜单的 9008 项仍保留，但会直接
-> 返回“不支持”（`-100`）。后续排查方向：反汇编 `xbl.elf` 确认其真正读取的 IMEM
-> 偏移（或 `misc` BCB），或改用硬件按键/EDL 线。
+> 为避免保留未验证的推测代码，这些实现已全部移除；`imem_request()` 对 EDL 直接返回
+> `-100`，不会写 IMEM、PON 或 PSCI。菜单的 9008 项仍保留。后续排查方向：反汇编
+> `xbl.elf` 确认其真正读取的 IMEM 偏移（或 `misc` BCB），或改用硬件按键/EDL 线。
 - **复位必须是 PMIC 暖复位**：普通 PSCI `SYSTEM_RESET` 是硬复位，会清空 IMEM，bootloader
   只能重新进 Android（前几轮实机三模式全部回 Android 已证实）。改用原厂
-  `qpnp-power-on` 的暖复位路径：SPMI SID 0（PM8150）的 PON 位于 `0x800`，
-  先写 PON 重启原因（`0x88F`，GEN2 从 bit1 起，Recovery=1、Fastboot=2），
-  再按下游顺序配置 `PS_HOLD_RST_CTL(0x85A)` / `PS_HOLD_RST_CTL2(0x85B)`：
-  清 `RESET_EN` → 延时 500µs → 类型写 `0x1`（warm）→ 置 `RESET_EN`，最后写
-  TCSR `PS_HOLD`（`0xC264000`，取自 `qcom,pshold`）为 0 触发；与下游一样先尝试
-  SCM `SCM_SVC_PWR/2`（TCSR 可能只允许安全世界写），调用返回后再直写兜底。
+  `qpnp-power-on` 的暖复位路径（`src/drivers/qcom_pon.c`）：
+  - 先探测 SPMI SID 0 的 PM8150 PON：`PERPH_SUBTYPE(0x805) == 0x04`（GEN2 主 PON）；
+    其它子类型或 SPMI 资源缺失都视为不可用。
+  - 写 PON 重启原因 `SOFT_RB_SPARE(0x88F)`：GEN2 从 bit1 起，Recovery=1、Fastboot=2；
+    写后回读，失败则恢复旧值。
+  - 按下游顺序配置 `PS_HOLD_RST_CTL(0x85A)` / `PS_HOLD_RST_CTL2(0x85B)`：
+    清 `RESET_EN` → 延时 500µs → 类型写 `0x1`（warm）→ 置 `RESET_EN`。
+  - 最后拉低 TCSR `PS_HOLD`（`0xC264000`，取自 `qcom,pshold`）触发；与下游一样先尝试
+    SCM `SCM_SVC_PWR/2`（`SCM_DEASSERT_PS_HOLD`，TCSR 可能只允许安全世界写），调用返回后
+    再直写兜底。
 - 只有 PON 路径不可用（SPMI 资源缺失、PON 子类型无效或寄存器写失败）时才退回
   PSCI `SYSTEM_RESET2` → 普通 `SYSTEM_RESET`，保证设备至少能重启；此时屏上会显示
-  `-106` / `-107`。PON 配置成功后**绝不再触发硬复位**，以免清掉刚写入的 cookie。
+  `-106` / `-107`。PON 配置成功后**绝不再触发硬复位**；若拉低 `PS_HOLD` 后函数仍返回，
+  则撤销 PON 配置、回滚 IMEM，并报 `-104`。
 - Android-only 配置没有调试串口，失败时把数值码追加到状态栏，例如
   `切换启动模式失败 (-104)`，这是唯一的现场反馈。
 
 | 码 | 含义 |
 |---|---|
-| -100 | 不支持（PSCI conduit 非 SMC） |
+| -100 | 不支持（elish 的 EDL 固定返回；其它布局还可能是 PSCI conduit 非 SMC） |
 | -101 | DT 无效（找不到 IMEM 地址） |
 | -102 | MMIO 读写失败 |
 | -103 | 写后回读校验失败 |
-| -104 | 复位调用返回（没有真正复位） |
+| -104 | 复位调用返回（没有真正复位），已撤销 PON 并回滚 |
 | -105 | 回滚失败 |
-| -106 | PON 暖复位不可用（SPMI 资源或 PON 探测失败），已回退 PSCI |
+| -106 | PON 暖复位不可用（SPMI 资源、`qcom,pshold` 缺失或 PON 探测失败），已回退 PSCI |
 | -107 | PON 寄存器写入/校验失败，已回退 PSCI |
 
-代码：`src/drivers/qcom_reboot.c`（IMEM 路径、复位回退）、`src/drivers/qcom_pon.c`
-（PM8150 PON 暖复位）、`src/include/qcom_reboot.h` / `qcom_pon.h`、
-`src/core/platform.c`（屏上状态码）。host 回归：`qcom_reboot_test`（含 PON 寄存器序列）、
-`platform_*`、`boot_settings_test`。
+代码：`src/drivers/qcom_reboot.c`（布局分派、IMEM 路径、复位回退）、
+`src/drivers/qcom_pon.c`（PM8150 PON 暖复位）、`src/include/qcom_reboot.h` / `qcom_pon.h`、
+`src/core/platform.c`（屏上状态码）。host 回归：`qcom_reboot_test` 覆盖 IMEM
+写入/校验/回滚、PON 寄存器序列（`0x88F`/`0x85A`/`0x85B`）、SCM PS_HOLD，以及 PON
+不可用/写失败时的 PSCI 回退；`platform_advanced_menu_test`、
+`platform_menu_console_off_test`、`boot_settings_test` 覆盖菜单与状态行。
+
+```sh
+cmake -S devices/lenovo-tb323fu/boot/kshim-success-source/tests -B build/host \
+  -G Ninja -DCMAKE_C_COMPILER=clang
+# 全量
+ctest --test-dir build/host --output-on-failure
+# 或只跑本页相关用例
+ctest --test-dir build/host --output-on-failure \
+  -R 'qcom_reboot|platform_advanced_menu|platform_menu_console_off|boot_settings'
+```
 
 ## 硬件调研（来自官方 dtbo overlay）
 
@@ -127,12 +157,30 @@ M1 的高级动作要在 Android-only 菜单里直接切换启动模式。elish 
 
 ## 构建与打包
 
+### runtime 配置（`elish_defconfig`）
+
+| 配置 | 值 / 作用 |
+|---|---|
+| `CONFIG_QCOM_KEYS` / `CONFIG_QCOM_SPMI` | 音量/电源键（Kona 标准布局） |
+| `CONFIG_KSHIM_SPLASH_LIVE_FALLBACK=y` | 只读 SSPP 现场 scanout，解决 elish 上 `cont_splash_region` 未被扫描的问题 |
+| `CONFIG_KSHIM_UI_ROTATION_CCW=270` | LVGL 2560×1600 横屏排版 → 1600×2560 竖屏 scanout |
+| `CONFIG_KSHIM_LVGL_BUFFER_BYTES=243712` | 按 2560 宽逻辑行分配，控制在 4 MiB runtime 槽内 |
+| `CONFIG_KSHIM_MENU_ENTRY_DURATION_MS=0` | 首帧直接显示完整菜单，不做入场动画 |
+| `CONFIG_KSHIM_MENU_STYLE_STAR_CHART` / `..._LANGUAGE_SWITCH` / `..._SESSION_SETTINGS` | 星图风格、中英切换、会话设置 |
+| `CONFIG_KSHIM_MENU_CHINESE` / `..._ENTRY_DETAILS` / `..._BASE_ANDROID` / `..._POWER_ACTIONS` / `..._ADVANCED_ACTIONS` | 菜单页面与动作（含 Recovery/Fastboot/EDL） |
+| `CONFIG_KSHIM_QCOM_REBOOT=y` | 高级启动动作（见上节） |
+| `CONFIG_KSHIM_TOUCH` / `CONFIG_KSHIM_SMP` / `CONFIG_KSHIM_DEBUG_CONSOLE` | **关闭**：触屏待驱动接入；Android-only 没有调试串口 |
+
+runtime 源码（`src/`、`startup.S`、MMU/驱动等）改动后必须重新生成 `kShimC.bin` 并重打包
+boot，旧 runtime 产物不会反映新源码。直接交接 base 镜像的尾路径（`src/core/main.c`）
+在跳转前调用 `kshim_mmu_prepare_handoff()` 关闭早期翻译，与正常 `prepare_boot` 交接保持一致。
+
 ### runtime（4 MiB）
 
 ```sh
-# K = devices/lenovo-tb323fu/boot/kshim-success-source（共享源码树）
+# 在共享源码树 K = devices/lenovo-tb323fu/boot/kshim-success-source 内执行
 python3 tools/build_runtime.py --config configs/elish_defconfig --out <runtime-out> --jobs 8
-# 产物 <runtime-out>/kShimC.bin，必须恰好 4 MiB
+# 产物 <runtime-out>/kShimC.bin，必须恰好 4 MiB；validation.json 记录 sha256
 ```
 
 ### Android-only boot（v3，M1）
@@ -145,13 +193,21 @@ python3 devices/xiaomi-elish/boot/build_android_boot.py \
   --unpacker  <UnpackTool> \
   --avbtool   packages/kshim-tools/vendor/avbtool.py \
   --out       <输出目录> \
+  [--repacker devices/xiaomi-elish/boot/repack_boot_v3.py] \
+  [--dt-probe-report-slots] \
   [--source-label elish-android-only-v1]
 ```
 
 - 输入约束：`--stock-boot` 必须是 128 MiB（134217728 字节）、魔数 `ANDROID!`、**header v3**
   （header_size 1580）、内核为 raw ARM64 Image（`ARM\x64`@0x38）、带 AVB footer。
+- `--repacker` 默认就是 [repack_boot_v3.py](boot/repack_boot_v3.py)，一般无需显式传入；
+  `--dt-probe-report-slots` 仅在需要把 DT 探针结果写入报告槽时启用，且要求原镜像带
+  AVB footer。
+- `--out` 必须是空目录，且不能与任何输入路径重叠（否则 `prepare` 阶段直接失败）。
 - 打包驱动会做字节级校验（manifest ABI、unpack→repack 往返、AVB verify），一次通过产出
-  `boot.img` + `report.json`。
+  `boot.img` + `report.json` + `repack_report.json`；失败则写 `failure.json`。`report.json`
+  记录全部输入/输出的 sha256、manifest（默认条目 `Image-00`、`Timeout=8000`）、原厂
+  ramdisk 保留情况、AVB 信息与检查项列表。
 - **ramdisk 处理**：原厂 boot ramdisk（gzip，解压约 38 MiB cpio）由
   [repack_boot_v3.py](boot/repack_boot_v3.py) **字节级保留**在重打包 boot 的内核之后。Android
   内核经 bootloader DT 的 `/chosen/linux,initrd-*` 获取 ramdisk（kShimC 的 base 交接只传 DT，
@@ -179,13 +235,13 @@ AVB 为未签名（Algorithm NONE），刷入分区需要解锁 bootloader。
 4. ~~菜单方向~~ → 原生竖屏 1600×2560 + `CONFIG_KSHIM_UI_ROTATION_CCW=270`，横屏正确。
 5. ~~设备信息页~~ → Board `Mi Pad 5 Pro (elish)`、SoC `SM8250`。
 
-M1 fix（高级启动动作，实机调试中）：
+M1 fix（高级启动动作，已实机验证；EDL 除外）：
 
-6. Recovery / Fastboot / EDL 切换：PM8150 PON 暖复位（`qcom_pon.c`）**已实机验证**——
-   **Recovery / Fastboot 通过**（暖复位 + IMEM `restart_reason`），**EDL（9008）遗留**：
+6. Recovery / Fastboot 切换：PM8150 PON 暖复位（`qcom_pon.c`）**已实机验证**——
+   **Recovery / Fastboot 均通过**（暖复位 + IMEM `restart_reason`），**EDL（9008）遗留**：
    三轮尝试（SCM `0x50`、SCM `0x10`+`EDLOAD`、IMEM download_mode cookie）均只回 Android，
    未验证的推测实现已移除，9008 菜单项返回“不支持”；待反汇编 `xbl.elf` 后另开课题。
-   失败时按 `-104/-106/-107` 显示。
+   失败时按 `-104/-106/-107` 显示在状态栏。
 
 原厂 boot.img 备份与 sha256 全程记录在 `/tmp/opencode/elish/stock/SHA256SUMS`；不要把
 `~/Downloads/boot.img`（那是 TB322FC 的）与 elish 的混用。

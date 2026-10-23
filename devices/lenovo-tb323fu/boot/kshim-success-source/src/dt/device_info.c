@@ -46,6 +46,28 @@ static bool list_contains(const char *list, int len, const char *entry)
     return fdt_stringlist_contains(list, len, entry) > 0;
 }
 
+/* True when any entry of a well formed NUL-separated list starts with prefix.
+ * Qualcomm root compatibles carry a board suffix ("qcom,kona-mtp") instead of
+ * the bare SoC name, so an exact stringlist match is not enough for them. */
+static bool list_entry_prefix(const char *list, int len, const char *prefix)
+{
+    size_t plen = strlen(prefix);
+    int off;
+
+    if (!list || len <= 0 || plen == 0)
+        return false;
+    for (off = 0; off < len;) {
+        size_t entry = 0;
+
+        while (off + (int)entry < len && list[off + entry] != '\0')
+            entry++;
+        if (entry >= plen && strncmp(list + off, prefix, plen) == 0)
+            return true;
+        off += (int)entry + 1;
+    }
+    return false;
+}
+
 /* True when list is a well formed nonempty string list: at least one entry,
  * no empty entry and a terminal NUL. */
 static bool compatible_list_valid(const char *list, int len)
@@ -155,7 +177,7 @@ void device_info_read(const void *validated_fdt, struct device_info *info)
     const char *model, *compatible;
     int compat_len, off, rc;
     size_t cap, used;
-    bool truncated, tb322, tb323, soc8750, soc8850;
+    bool truncated, tb322, tb323, elish, soc8750, soc8850, soc8250;
     uint64_t ram = 0;
 
     if (!info)
@@ -207,6 +229,10 @@ void device_info_read(const void *validated_fdt, struct device_info *info)
                   list_contains(compatible, compat_len, "qcom,canoep") ||
                   list_contains(compatible, compat_len, "qcom,kaanapali") ||
                   list_contains(compatible, compat_len, "qcom,sm8850");
+        /* Kona is SM8250. The Xiaomi ABL runtime DT advertises the reference
+         * board ("qcom,kona-mtp"), so this group needs a family prefix match. */
+        soc8250 = list_contains(compatible, compat_len, "qcom,sm8250") ||
+                  list_entry_prefix(compatible, compat_len, "qcom,kona");
 
         /* The trusted Linux reference pairing (elden + sm8750) is unchanged.
          * A stock TB322FC is additionally accepted from the measured .096
@@ -232,11 +258,20 @@ void device_info_read(const void *validated_fdt, struct device_info *info)
                      validated_fdt,
                      "qcom,mdss_dsi_baldur_nt36523_csot_3k_dsc_vid",
                      "nt36523 3k fhd plus 165Hz DPHY video panel"));
-        if (tb322 != tb323)
-            info->board = tb322 ? DEVICE_BOARD_TB322FC : DEVICE_BOARD_TB323FU;
 
-        if (soc8750 != soc8850)
-            info->soc = soc8750 ? DEVICE_SOC_SM8750 : DEVICE_SOC_SM8850;
+        /* The single model-text exception: the Xiaomi ABL runtime DT has no
+         * "xiaomi,elish" root entry, but it does carry the Kona-family
+         * compatible and "xiaomi elish" in the model. Both signals are
+         * required, so another Kona board stays UNKNOWN. */
+        elish = soc8250 && model && strstr(model, "elish") != NULL;
+
+        if ((unsigned)tb322 + (unsigned)tb323 + (unsigned)elish == 1u)
+            info->board = tb322 ? DEVICE_BOARD_TB322FC :
+                          tb323 ? DEVICE_BOARD_TB323FU : DEVICE_BOARD_ELISH;
+
+        if ((unsigned)soc8750 + (unsigned)soc8850 + (unsigned)soc8250 == 1u)
+            info->soc = soc8750 ? DEVICE_SOC_SM8750 :
+                        soc8850 ? DEVICE_SOC_SM8850 : DEVICE_SOC_SM8250;
     }
 
     rc = memory_total(validated_fdt, &ram);

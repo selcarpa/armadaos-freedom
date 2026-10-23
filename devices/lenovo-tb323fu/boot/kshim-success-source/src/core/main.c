@@ -655,6 +655,11 @@ int kshim_main(
      * base image or a quiesce failure keeps the existing terminal wfe.  No
      * prepare_boot and no MMU work. */
     if (linux_base && kshim_console_quiesce() == 0) {
+        /* Early translation is configured unconditionally on this tree, so a
+         * successful early configuration leaves the MMU on.  The packed base
+         * image is entered with translation off (as the normal handoff does
+         * via prepare_boot), so tear it down before this diagnostic handoff. */
+        (void)kshim_mmu_prepare_handoff();
         arm64_boot_image(linux_base + 4, resources_only_device_tree,
                          kernel_arg1, kernel_arg2, kernel_arg3);
     }

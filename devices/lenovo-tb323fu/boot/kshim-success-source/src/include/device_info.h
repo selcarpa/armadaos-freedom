@@ -25,6 +25,12 @@
  *     "qcom,sm8750" (the trusted Linux TB322FC reference), or the alternate
  *     strict stock fingerprint described below.
  *   - DEVICE_BOARD_TB323FU: exact "lenovo,tb323fu" or exact "lenovo,baldur".
+ *   - DEVICE_BOARD_ELISH: the single documented model-text exception. The
+ *     Xiaomi ABL runtime DT carries no "xiaomi,elish" root entry; it advertises
+ *     the Kona MTP reference board ("qcom,kona-mtp") and puts the codename in
+ *     the model text ("Qualcomm Technologies, Inc. xiaomi elish"). Both
+ *     signals are required: a Kona-family root compatible AND a model that
+ *     contains "elish". A Kona board without that codename stays UNKNOWN.
  *   - "qcom,canoep" alone is a SoC marker, not a board identity.
  * Conflicting board evidence leave the board UNKNOWN; unrelated
  * devices that share a SoC keep the board UNKNOWN.
@@ -42,7 +48,10 @@
  *   - DEVICE_SOC_SM8750: "qcom,sun", "qcom,sunp" or "qcom,sm8750".
  *   - DEVICE_SOC_SM8850: "qcom,canoe", "qcom,canoep", "qcom,kaanapali" or
  *     "qcom,sm8850".
- * Entries from both groups leave the SoC UNKNOWN.
+ *   - DEVICE_SOC_SM8250: "qcom,sm8250" or any compatible entry beginning with
+ *     the "qcom,kona" family prefix (Kona is SM8250; the ABL runtime DT uses
+ *     "qcom,kona-mtp").
+ * Entries from more than one group leave the SoC UNKNOWN.
  *
  * The compatible field preserves the original root compatible list verbatim
  * as a NUL-separated list: whole entries are copied while they fit and
@@ -68,12 +77,14 @@ enum device_board {
     DEVICE_BOARD_UNKNOWN = 0,
     DEVICE_BOARD_TB322FC,
     DEVICE_BOARD_TB323FU,
+    DEVICE_BOARD_ELISH,
 };
 
 enum device_soc {
     DEVICE_SOC_UNKNOWN = 0,
     DEVICE_SOC_SM8750,
     DEVICE_SOC_SM8850,
+    DEVICE_SOC_SM8250,
 };
 
 struct device_info {

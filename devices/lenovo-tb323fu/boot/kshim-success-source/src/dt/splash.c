@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include <config.h>
 #include <qcom_dt.h>
 #include <Library/cr_splash.h>
 #include <string.h>
@@ -179,6 +180,138 @@ int kshim_splash_trace_report(const struct kshim_splash_trace *t, int status, ch
     if (n >= 0 && (size_t)n < capacity && n <= 80) return n;
     return -1;
 }
+#endif
+
+#if KSHIM_DIAGNOSTIC_RESOURCES_ONLY || CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+/* Live SSPP scanout state, read straight from the SDE registers.  Kept local to
+ * this translation unit: the live-fallback path below consumes it directly and
+ * the diagnostic builds only need it while probing. */
+#define KSHIM_LIVE_SCANOUT_MAX 8
+struct kshim_live_scanout {
+    uintptr_t address[KSHIM_LIVE_SCANOUT_MAX];
+    uint32_t width[KSHIM_LIVE_SCANOUT_MAX];
+    uint32_t height[KSHIM_LIVE_SCANOUT_MAX];
+    uint32_t stride[KSHIM_LIVE_SCANOUT_MAX];
+    uint32_t format[KSHIM_LIVE_SCANOUT_MAX];
+    unsigned count;
+    uint32_t ctl_intf[8];
+    uint32_t ctl_top[8];
+    unsigned ctl_count;
+    bool valid;
+};
+
+/* Live scanout probe: read every SSPP's SRC_SIZE / SRC0_ADDR / YSTRIDE0 /
+ * FORMAT straight from the SDE and keep every plausible buffer.  Deliberately
+ * independent of the layer-mixer routing decode and of the reserved-region
+ * containment rule, so it still finds the active buffer on trees (elish) where
+ * the bootloader leaves the scanout outside cont_splash_region and
+ * CrSplashRead rejects the layout. */
+static struct kshim_live_scanout g_live_scanout;
+
+static uint32_t live_rd(const struct CrIo *io, uint64_t base, uint32_t off)
+{
+    return io->read32(io->context, (uintptr_t)(base + off));
+}
+
+static void probe_live_scanout(const struct CrSplashResources *r, const struct CrIo *io)
+{
+    memset(&g_live_scanout, 0, sizeof(g_live_scanout));
+    if (!r || !io || !io->read32 || !r->base || r->lm_source_select) return;
+    if (r->ctl_count > 8 || r->pipe_count > 8) return;
+    for (unsigned c = 0; c < r->ctl_count; ++c) {
+        g_live_scanout.ctl_intf[c] = live_rd(io, r->base, r->ctl[c] + 0xf4u);
+        g_live_scanout.ctl_top[c] = live_rd(io, r->base, r->ctl[c] + 0x14u);
+    }
+    g_live_scanout.ctl_count = r->ctl_count;
+    for (unsigned p = 0; p < r->pipe_count; ++p) {
+        uint64_t pb = r->base + r->pipe[p];
+        uint32_t src = live_rd(io, pb, 0x00u);
+        uint32_t addr = live_rd(io, pb, 0x14u);
+        uint32_t stride = live_rd(io, pb, 0x24u);
+        uint32_t fmt = live_rd(io, pb, 0x30u);
+        uint32_t unpack = live_rd(io, pb, 0x34u);
+        uint32_t width = src & 0xffffu, height = src >> 16;
+        uint32_t v = fmt & ~(1u << 8);
+        uint32_t bpp = (v == 0x22216u && unpack == 0x00010002u) ? 2u : 4u;
+        uint64_t bytes;
+        kshim_fb_format_t format;
+        if (v == 0x22216u && unpack == 0x00010002u) {
+            format = KSHIM_FB_FORMAT_RGB565;
+        } else if (v == 0x236ffu && unpack == 0x03020001u) {
+            format = (fmt & (1u << 8)) ? KSHIM_FB_FORMAT_ARGB8888
+                                       : KSHIM_FB_FORMAT_XRGB8888;
+        } else if (v == 0x236ffu && unpack == 0x03010002u) {
+            format = (fmt & (1u << 8)) ? KSHIM_FB_FORMAT_ABGR8888
+                                       : KSHIM_FB_FORMAT_XBGR8888;
+        } else {
+            continue;
+        }
+        if (width < 64 || width > 8192 || height < 64 || height > 8192) continue;
+        if (addr < 0x40000000u || (addr & 3u)) continue;
+        if (stride < width * bpp || stride > 0x20000u) continue;
+        bytes = (uint64_t)stride * height;
+        if (bytes > (64u << 20)) continue;
+        unsigned slot = g_live_scanout.count;
+        if (slot >= KSHIM_LIVE_SCANOUT_MAX) break;
+        bool dup = false;
+        for (unsigned i = 0; i < slot; ++i)
+            if (g_live_scanout.address[i] == (uintptr_t)addr) dup = true;
+        if (dup) continue;
+        g_live_scanout.address[slot] = (uintptr_t)addr;
+        g_live_scanout.width[slot] = width;
+        g_live_scanout.height[slot] = height;
+        g_live_scanout.stride[slot] = stride;
+        g_live_scanout.format[slot] = (uint32_t)format;
+        ++g_live_scanout.count;
+    }
+    g_live_scanout.valid = g_live_scanout.count != 0;
+}
+#if CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+/* Adopt the live SSPP scanout as the UI framebuffer when CrSplashRead rejects
+ * the state.  A dual-DSI split (two horizontally adjacent buffers with the
+ * same height/stride/format) is merged into one full-width frame. */
+static int live_fallback_fb(kshim_framebuffer_config_t *fb)
+{
+    const struct kshim_live_scanout *l = &g_live_scanout;
+    if (!fb || !l->valid) return -1;
+    /* The colour-indexed hardware probe showed that the first plausible SSPP
+     * buffer (pipe order) is the visible top layer on elish; the DPU composites
+     * the remaining pipes underneath it. */
+    unsigned best = 0;
+    uint32_t width = l->width[best], height = l->height[best];
+    uint32_t stride = l->stride[best], format = l->format[best];
+    uint32_t bpp = format == KSHIM_FB_FORMAT_RGB565 ? 2u : 4u;
+    uint64_t address = l->address[best];
+    for (unsigned i = 0; i < l->count; ++i) {
+        if (i == best || l->height[i] != height || l->stride[i] != stride ||
+            l->format[i] != format) continue;
+        if (l->address[i] == address + (uint64_t)width * bpp) {
+            width += l->width[i];
+            break;
+        }
+        if (address == l->address[i] + (uint64_t)l->width[i] * bpp) {
+            address = l->address[i];
+            width += l->width[i];
+            break;
+        }
+    }
+    /* Dual-DSI split panels leave each SSPP reporting only half the panel
+     * width while YSTRIDE still spans the full row: the two pipes read the same
+     * buffer at different source-X offsets.  The logical width is therefore the
+     * stride expressed in pixels, which restores a full-screen landscape frame
+     * (elish: 1280-wide pipes, stride 10240 -> 2560x1600). */
+    uint32_t row_pixels = stride / bpp;
+    if (row_pixels > width) width = row_pixels;
+    *fb = (kshim_framebuffer_config_t){.render_address = (uintptr_t)address,
+        .width = width, .height = height, .stride = stride,
+        .bpp = bpp == 2 ? 16 : 32,
+        .format = (kshim_fb_format_t)format,
+        .buffer_size = (size_t)stride * height,
+        .foreground = UINT32_MAX,
+        .background = bpp == 2 ? 0 : 0xff000000};
+    return 0;
+}
+#endif
 #endif
 static int offsets(const void *f, int n, const char *name, uint32_t *out, unsigned capacity)
 {
@@ -374,6 +507,20 @@ int kshim_dt_splash(const void *f, const struct CrIo *io,
     }
 #else
     int status = CrSplashRead(&resources, io, &scanout);
+#endif
+#if KSHIM_DIAGNOSTIC_RESOURCES_ONLY || CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+    /* Stage 12: live scanout probe (elish visual-probe + fallback support). */
+    if (io && io->read32) probe_live_scanout(&resources, io);
+#endif
+#if CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+    /* Prefer the live SSPP scanout: on elish CrSplashRead can succeed while
+     * returning the cont_splash_region reservation, which the bootloader no
+     * longer scans (the panel keeps showing a black frame).  Adopt the buffer
+     * the DPU actually reads whenever it looks usable. */
+    if (!live_fallback_fb(fb)) {
+        *mmio = (kshim_mmu_region_t){reg.base, reg.size, KSHIM_MMU_DEVICE, KSHIM_MMU_READ};
+        return 0;
+    }
 #endif
 #if KSHIM_DIAGNOSTIC_RESOURCES_ONLY
     if (io && io->read32 && status == -95 &&

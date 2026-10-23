@@ -120,6 +120,19 @@ menu "Framebuffer and UI"
         bool "Enable validated continuous splash framebuffer UI"
         default y
 
+    config KSHIM_SPLASH_LIVE_FALLBACK
+        depends on KSHIM_FRAMEBUFFER
+        bool "Fall back to the live SSPP scanout when CrSplashRead rejects it"
+        default n
+        help
+            Read every SSPP SRC_SIZE/SRC0_ADDR/YSTRIDE/FORMAT directly from the
+            SDE and adopt the largest plausible buffer (merging a dual-DSI
+            horizontal split) when CrSplashRead rejects the live state.  Needed
+            on trees whose bootloader leaves the scanout outside the
+            cont_splash_region reservation, such as xiaomi-elish.  The fallback
+            buffer is mapped non-cacheable and the unused splash reservation is
+            reused as UI scratch memory.
+
     config KSHIM_FB_RENDER_ADDRESS
         depends on KSHIM_QEMU_PLATFORM
         hex "Framebuffer render address"

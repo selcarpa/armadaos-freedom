@@ -765,10 +765,12 @@ static int menu_fill_device_info(struct menu_selection *menu)
     snprintf(menu->info_values[0], sizeof(menu->info_values[0]), "%s",
              info->board == DEVICE_BOARD_TB322FC ? "TB322FC" :
              info->board == DEVICE_BOARD_TB323FU ? "TB323FU" :
+             info->board == DEVICE_BOARD_ELISH ? "Mi Pad 5 Pro (elish)" :
              kshim_menu_text(KSHIM_TEXT_UNKNOWN));
     snprintf(menu->info_values[1], sizeof(menu->info_values[1]), "%s",
              info->soc == DEVICE_SOC_SM8750 ? "SM8750" :
              info->soc == DEVICE_SOC_SM8850 ? "SM8850" :
+             info->soc == DEVICE_SOC_SM8250 ? "SM8250" :
              kshim_menu_text(KSHIM_TEXT_UNKNOWN));
 
     /* Original DT model, bounded to a readable length on a UTF-8 boundary with
@@ -906,6 +908,7 @@ static const char *settings_board_name(enum device_board board)
 {
     if (board == DEVICE_BOARD_TB322FC) return kshim_menu_text(KSHIM_TEXT_BOARD_TB322FC_NAME);
     if (board == DEVICE_BOARD_TB323FU) return kshim_menu_text(KSHIM_TEXT_BOARD_TB323FU_NAME);
+    if (board == DEVICE_BOARD_ELISH) return "Mi Pad 5 Pro";
     return kshim_menu_text(KSHIM_TEXT_UNKNOWN);
 }
 /* Localized platform code for a board. */
@@ -913,6 +916,7 @@ static const char *settings_board_code(enum device_board board)
 {
     if (board == DEVICE_BOARD_TB322FC) return kshim_menu_text(KSHIM_TEXT_DEVICE_TB322FC_NAME);
     if (board == DEVICE_BOARD_TB323FU) return kshim_menu_text(KSHIM_TEXT_DEVICE_TB323FU_NAME);
+    if (board == DEVICE_BOARD_ELISH) return "elish";
     return kshim_menu_text(KSHIM_TEXT_UNKNOWN);
 }
 /* Row index of the selectable Default-page row that matches the resolved

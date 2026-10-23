@@ -83,8 +83,17 @@ static void ui_scratch_from_splash(const void *f, struct kshim_resources *r)
     uint64_t start = r->framebuffer.render_address + r->framebuffer.buffer_size;
     if (kshim_dt_splash_reservation(f, &reservation, NULL) ||
         start < r->framebuffer.render_address || start > UINT64_MAX - 4095) return;
-    start = (start + 4095) & ~UINT64_C(4095);
     uint64_t end = reservation.base + reservation.size;
+#if CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+    /* When the bootloader left the scanout outside the reservation (elish), the
+     * whole reservation is spare display memory while kShimC runs. */
+    if (r->framebuffer.buffer_size <= UINT64_MAX - r->framebuffer.render_address &&
+        r->framebuffer.render_address + r->framebuffer.buffer_size <= reservation.base) {
+        r->ui_scratch = reservation;
+        return;
+    }
+#endif
+    start = (start + 4095) & ~UINT64_C(4095);
     if (start >= reservation.base && start < end)
         r->ui_scratch = (struct dt_range){start, end - start};
 }
@@ -149,7 +158,25 @@ static int resources_init_validated(const void *f)
     resources.splash_status = kshim_dt_splash(f, CrIoDefault(), &resources.framebuffer, &display);
     if (!resources.splash_status && kshim_resource_map(&resources, display.base, display.size,
             display.type, display.permissions)) return -1;
-    if (!resources.splash_status) ui_scratch_from_splash(f, &resources);
+    if (!resources.splash_status) {
+#if CONFIG_KSHIM_SPLASH_LIVE_FALLBACK
+        /* A live-fallback scanout can sit outside cont_splash_region, so it is
+         * not covered by the reserved-memory mapping: map it non-cacheable. */
+        struct dt_range reservation = {0};
+        uintptr_t address = resources.framebuffer.render_address;
+        size_t size = resources.framebuffer.buffer_size;
+        bool covered = false;
+        if (!kshim_dt_splash_reservation(f, &reservation, NULL) &&
+            address >= reservation.base && size != 0 &&
+            address - reservation.base <= reservation.size &&
+            size <= reservation.size - (address - reservation.base))
+            covered = true;
+        if (!covered && size &&
+            kshim_resource_map(&resources, address, size, KSHIM_MMU_NORMAL_NC,
+                               KSHIM_MMU_READ | KSHIM_MMU_WRITE)) return -1;
+#endif
+        ui_scratch_from_splash(f, &resources);
+    }
 #if CONFIG_KSHIM_UI_SCRATCH_SIZE
     if (!resources.ui_scratch.size)
         resources.ui_scratch = (struct dt_range){CONFIG_KSHIM_UI_SCRATCH_BASE,

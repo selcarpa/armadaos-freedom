@@ -1128,13 +1128,17 @@ static void test_advanced_reboot_failures(void)
                     assert(h.page_count == 2 && h.advanced_page);
                     assert(h.countdown_zero >= 1 && h.countdown_started == 1);
 #if CONFIG_KSHIM_MENU_CHINESE
-                    const char *expected = results[result] == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED
+                    const char *reason = results[result] == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED
                         ? "切换启动模式失败，恢复原设置失败" : "切换启动模式失败";
 #else
-                    const char *expected = results[result] == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED
+                    const char *reason = results[result] == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED
                         ? "Boot mode switch failed; restoring the original settings failed"
                         : "Boot mode switch failed";
 #endif
+                    /* The numeric result is appended so it stays visible without
+                     * a debug console. */
+                    char expected[160];
+                    (void)snprintf(expected, sizeof(expected), "%s (%d)", reason, results[result]);
                     assert(strcmp(h.status, expected) == 0);
                 }
             }

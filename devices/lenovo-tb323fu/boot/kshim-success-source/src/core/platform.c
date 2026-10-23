@@ -1647,9 +1647,18 @@ static int menu_activate(struct menu_selection *menu, size_t index,
             KSHIM_QCOM_REBOOT_RECOVERY : action == MENU_FASTBOOT ?
             KSHIM_QCOM_REBOOT_BOOTLOADER : KSHIM_QCOM_REBOOT_EDL;
         int result = kshim_qcom_reboot_request(menu->fdt, target);
-        *failure = result == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED ?
+        const char *reason = result == KSHIM_QCOM_REBOOT_ROLLBACK_FAILED ?
             KSHIM_STR_RESTORE_FAILED : KSHIM_STR_MODE_FAILED;
-        printf("%s: %d\n", *failure, result);
+        /* The Android-only profiles build without a debug console, so the only
+         * feedback after a failed mode switch is this status line. Append the
+         * numeric result so the failure class is visible on screen:
+         * -100 unsupported, -101 invalid DT, -102 I/O failed, -103 verify
+         * failed, -104 reset returned, -105 rollback failed, -106 PON warm
+         * reset unavailable, -107 PON register write failed. */
+        static char status[192];
+        (void)snprintf(status, sizeof(status), "%s (%d)", reason, result);
+        *failure = status;
+        printf("%s\n", status);
         return 0;
     }
 #endif

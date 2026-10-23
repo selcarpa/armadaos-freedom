@@ -7,6 +7,7 @@
 #include <config.h>
 #endif
 #include <qcom_reboot.h>
+#include <qcom_pon.h>
 #include <qcom_dt.h>
 #include <psci.h>
 #include <string.h>
@@ -20,7 +21,16 @@
 #define SCM_IO_READ UINT32_C(0xc2000501)
 #define SCM_IO_WRITE UINT32_C(0xc2000502)
 #define SCM_OEM_REBOOT UINT32_C(0xc3000922)
+#define SCM_DEASSERT_PS_HOLD UINT32_C(0xc2000902)
 #define PSCI_RESET2 UINT32_C(0xc4000012)
+/* Availability queries take the 32-bit SIP function-id form. */
+#define SCM_AVAIL_DEASSERT_PS_HOLD UINT32_C(0x02000902)
+/* Kona 原厂 scm_is_call_available() 用非 atomic 的 SMC64 发起查询：
+ * x0 = SCM_SIP_FNID(SCM_SVC_INFO, IS_CALL_AVAIL_CMD) | SMC64_MASK
+ *    = 0x02000601 | 0x40000000 = 0x42000601（不是下面的 0xc2... atomic 形式）。
+ * 直接调用（deassert_ps_hold）才用 scm_call2_atomic：
+ * x0 = fnid | 0xC0000000。 */
+#define SCM_INFO_IMEM UINT32_C(0x42000601)
 
 static int enabled_ancestors(const void *fdt, int node)
 {
@@ -39,13 +49,47 @@ static int unique_compatible(const void *fdt, const char *compatible)
     return found;
 }
 
+static int parse_scm_sdam(const void *fdt,
+                          struct kshim_qcom_reboot_config *config);
+
+static int parse_imem(const void *fdt, struct kshim_qcom_reboot_config *config)
+{
+    struct kshim_qcom_reboot_config parsed = {
+        .fdt = fdt, .layout = KSHIM_QCOM_REBOOT_LAYOUT_IMEM};
+    struct dt_range range;
+    /* The Kona IMEM binding hangs the restart_reason register off the
+     * qcom,msm-imem@146bf000 node as an offset-only child; dt_reg translates
+     * it through the node's ranges. */
+    int reason = unique_compatible(fdt, "qcom,msm-imem-restart_reason");
+    if (reason < 0 || dt_reg(fdt, reason, 0, &range) || range.size < 4)
+        return KSHIM_QCOM_REBOOT_INVALID_DT;
+    parsed.imem_reason_address = range.base;
+    /* Optional: the TCSR ps-hold register from the pshold node; writing zero
+     * deasserts PS_HOLD and triggers the warm reset armed in the PMIC PON. */
+    int pshold = unique_compatible(fdt, "qcom,pshold");
+    if (pshold >= 0 && !dt_reg(fdt, pshold, 0, &range) && range.size >= 4)
+        parsed.imem_pshold_address = range.base;
+    *config = parsed;
+    return 0;
+}
+
 int kshim_qcom_reboot_parse(const void *fdt,
+                          struct kshim_qcom_reboot_config *config)
+{
+    if (!config || !fdt || fdt_check_header(fdt))
+        return KSHIM_QCOM_REBOOT_INVALID_DT;
+    if (!fdt_node_check_compatible(fdt, 0, "qcom,kona-mtp") ||
+        !fdt_node_check_compatible(fdt, 0, "qcom,kona") ||
+        !fdt_node_check_compatible(fdt, 0, "qcom,sm8250"))
+        return parse_imem(fdt, config);
+    return parse_scm_sdam(fdt, config);
+}
+
+static int parse_scm_sdam(const void *fdt,
                           struct kshim_qcom_reboot_config *config)
 {
     struct kshim_qcom_reboot_config parsed = {.fdt = fdt};
     int length;
-    if (!config || !fdt || fdt_check_header(fdt))
-        return KSHIM_QCOM_REBOOT_INVALID_DT;
     /* This driver is additionally opt-in at build time. Mainline board names
      * are accepted only if the actual hardware descriptions below exist. */
     if (fdt_node_check_compatible(fdt, 0, "qcom,canoep") &&
@@ -152,6 +196,15 @@ static int scm_available(uint32_t query)
 {
     uint32_t available = 0;
     return scm_call(SCM_INFO, 1, query, 0, &available) == 0 && available == 1;
+}
+
+/* IMEM（kona）路径专用的 availability 查询：用原厂非 atomic 的 SMC64 fnid，
+ * 且与下游 scm_is_call_available() 一致按「返回值 > 0」判定。 */
+static int scm_available_imem(uint32_t query)
+{
+    uint32_t available = 0;
+    return scm_call(SCM_INFO_IMEM, 1, query, 0, &available) == 0 &&
+           available != 0;
 }
 
 static int dload_read(const struct kshim_qcom_reboot_config *c, uint32_t *value)
@@ -305,7 +358,114 @@ __attribute__((weak)) int kshim_qcom_reboot_spmi_write(
     return CR_ERROR(status) || reboot_spmi.fault ? -1 : 0;
 }
 
-int kshim_qcom_reboot_request(const void *fdt, enum kshim_qcom_reboot_target target)
+/* Kona/SM8250 IMEM reboot reason. The downstream msm-poweroff driver writes
+ * the same values for reboot bootloader/recovery, and the stock bootloader
+ * consumes them on the next boot. */
+#define IMEM_REASON_BOOTLOADER UINT32_C(0x77665500)
+#define IMEM_REASON_RECOVERY UINT32_C(0x77665502)
+
+__attribute__((weak)) int kshim_qcom_reboot_mmio_read(uint64_t address,
+                                                      uint32_t *value)
+{
+    if (!value) return -1;
+    barrier();
+    *value = *(volatile uint32_t *)(uintptr_t)address;
+    barrier();
+    return 0;
+}
+
+__attribute__((weak)) int kshim_qcom_reboot_mmio_write(uint64_t address,
+                                                       uint32_t value)
+{
+    barrier();
+    *(volatile uint32_t *)(uintptr_t)address = value;
+    barrier();
+    return 0;
+}
+
+__attribute__((weak)) int kshim_qcom_reboot_pshold(uint64_t address)
+{
+    /* 与下游 deassert_ps_hold() 一致：优先请安全世界拉低 PS_HOLD（TCSR 可能
+     * 对非安全世界写保护），调用返回后再直写兜底。 */
+    if (scm_available_imem(SCM_AVAIL_DEASSERT_PS_HOLD))
+        (void)scm_call(SCM_DEASSERT_PS_HOLD, 1, 0, 0, NULL);
+    return kshim_qcom_reboot_mmio_write(address, 0);
+}
+
+static int imem_request(const struct kshim_qcom_reboot_config *c,
+                        enum kshim_qcom_reboot_target target)
+{
+    uint32_t old_reason = 0, actual_reason = 0;
+    int changed_reason = 0, error, rollback_failed = 0, warm;
+    /* EDL (9008) 在 elish 上仍无法进入下载模式；此前尝试的 IMEM dload cookie、
+     * SCM 安全下载与 TCSR 兜底均未经验证且实机无效，已移除。这里明确报告
+     * 不支持（见 devices/xiaomi-elish/README.md）。 */
+    if (target == KSHIM_QCOM_REBOOT_EDL)
+        return KSHIM_QCOM_REBOOT_UNSUPPORTED;
+    /* The recovery/bootloader reason lives in IMEM, which only a PMIC warm
+     * reset keeps intact. Configure the PON warm reset first (the downstream
+     * msm-poweroff path for a reboot with a reason); the PSCI chain stays as
+     * the fallback when the PMIC path is not available. */
+    if (kshim_psci_init(c->fdt) || kshim_psci_conduit() != KSHIM_PSCI_CONDUIT_SMC)
+        return KSHIM_QCOM_REBOOT_UNSUPPORTED;
+    warm = kshim_psci_version() >= UINT32_C(0x10000) &&
+           kshim_psci_features(PSCI_RESET2) == 0;
+    if (kshim_qcom_reboot_mmio_read(c->imem_reason_address, &old_reason))
+        return KSHIM_QCOM_REBOOT_IO_FAILED;
+
+    uint32_t desired = target == KSHIM_QCOM_REBOOT_RECOVERY ?
+        IMEM_REASON_RECOVERY : IMEM_REASON_BOOTLOADER;
+    /* A failed write can still have reached hardware: include it in the
+     * rollback span. */
+    changed_reason = 1;
+    error = KSHIM_QCOM_REBOOT_IO_FAILED;
+    if (kshim_qcom_reboot_mmio_write(c->imem_reason_address, desired))
+        goto rollback;
+    error = KSHIM_QCOM_REBOOT_VERIFY_FAILED;
+    if (kshim_qcom_reboot_mmio_read(c->imem_reason_address, &actual_reason) ||
+        actual_reason != desired)
+        goto rollback;
+
+    barrier();
+    /* 硬复位会清空 IMEM，只有 PMIC 暖复位能让 bootloader 看到刚写入的 cookie。
+     * Kona 的 PON 位于 PM8150（SPMI SID 0）；配置暖复位后拉低 PS_HOLD 触发。
+     * PON 路径不可用时退回 PSCI 复位链，至少保证设备能重启，屏上显示
+     * -106（PON 不可用）或 -107（PON 寄存器写失败）。 */
+    int reason = target == KSHIM_QCOM_REBOOT_RECOVERY ? 1 : 2;
+    struct kshim_qcom_pon_state pon = {0};
+    int pon_result = c->imem_pshold_address ?
+        kshim_qcom_pon_warm_reset(c->imem_pshold_address, reason, &pon) :
+        KSHIM_QCOM_PON_UNAVAILABLE;
+    if (pon_result == KSHIM_QCOM_PON_OK) {
+        /* PON 已拉低 PS_HOLD；函数返回说明复位没有发生。此时绝不能再触发
+         * 硬复位（会清掉 cookie），撤销 PON 配置后按失败回滚。 */
+        kshim_qcom_pon_abort(&pon);
+        error = KSHIM_QCOM_REBOOT_RESET_RETURNED;
+    } else {
+        /* 配置失败时也要撤销可能已经写入的 PON 重启原因。 */
+        kshim_qcom_pon_abort(&pon);
+        if (warm) (void)kshim_psci_call(PSCI_RESET2, 0, 0, 0);
+        /* A PSCI reset that returns has not happened. elish's firmware
+         * advertises SYSTEM_RESET2 but the call returns, while the plain
+         * SYSTEM_RESET is the path the main-menu Restart uses and does reset
+         * this board. Try it before reporting failure; the IMEM cookie is
+         * already written either way. */
+        (void)kshim_psci_request_system_reset();
+        error = pon_result == KSHIM_QCOM_PON_UNAVAILABLE ?
+            KSHIM_QCOM_REBOOT_PON_UNAVAILABLE : KSHIM_QCOM_REBOOT_PON_FAILED;
+    }
+rollback:
+    if (changed_reason) {
+        if (kshim_qcom_reboot_mmio_write(c->imem_reason_address, old_reason))
+            rollback_failed = 1;
+        if (kshim_qcom_reboot_mmio_read(c->imem_reason_address, &actual_reason) ||
+            actual_reason != old_reason)
+            rollback_failed = 1;
+    }
+    return rollback_failed ? KSHIM_QCOM_REBOOT_ROLLBACK_FAILED : error;
+}
+
+static int scm_sdam_request(const void *fdt, enum kshim_qcom_reboot_target target)
 {
     struct kshim_qcom_reboot_config c;
     uint32_t old_dload, actual_dload;
@@ -380,6 +540,19 @@ rollback:
     }
     reboot_spmi.ready = 0;
     return rollback_failed ? KSHIM_QCOM_REBOOT_ROLLBACK_FAILED : error;
+}
+
+int kshim_qcom_reboot_request(const void *fdt, enum kshim_qcom_reboot_target target)
+{
+    struct kshim_qcom_reboot_config c;
+    int error;
+    if ((unsigned)target > KSHIM_QCOM_REBOOT_EDL)
+        return KSHIM_QCOM_REBOOT_UNSUPPORTED;
+    error = kshim_qcom_reboot_parse(fdt, &c);
+    if (error) return error;
+    if (c.layout == KSHIM_QCOM_REBOOT_LAYOUT_IMEM)
+        return imem_request(&c, target);
+    return scm_sdam_request(fdt, target);
 }
 
 #else

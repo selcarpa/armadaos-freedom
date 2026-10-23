@@ -22,6 +22,7 @@ elish 的适配状态、硬件调研与构建入口。当前以 Android-only 启
 | 原厂 Android 启动 | **实机验证通过**（ramdisk 字节保留，经 `linux,initrd-*` 传递） |
 | 显示 | **实机验证通过**：原生竖屏 1600×2560 + `CONFIG_KSHIM_UI_ROTATION_CCW=270`（见下节） |
 | 设备信息页 | **实机验证通过**：Board `Mi Pad 5 Pro (elish)`、SoC `SM8250` |
+| 高级启动动作 Recovery / Fastboot / EDL（M1 fix） | Recovery / **Fastboot 实机通过**（PM8150 PON 暖复位 + IMEM）；EDL（9008）为**已知遗留问题**（见下节） |
 | 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
 | 机身 Linux（M2） | 统一内核已重建，`sm8250-xiaomi-elish-{boe,csot}.dtb` 已进产物并含 handoff 适配 |
@@ -57,6 +58,58 @@ elish 的 stock boot.img 是 **header v3**（没有独立 dtb 段），运行时
 - **live scanout 回退**（`CONFIG_KSHIM_SPLASH_LIVE_FALLBACK`，仅 elish 开启）：elish 上
   `CrSplashRead` 可能“成功”但返回没人扫描的 `cont_splash_region`，因此直接读 SSPP 的
   `SRC_SIZE/SRC0_ADDR/YSTRIDE/FORMAT`，只要现场缓冲合理就优先采用。
+
+### 高级启动动作：Recovery / Fastboot / EDL（M1 fix）
+
+M1 的高级动作要在 Android-only 菜单里直接切换启动模式。elish 的运行时 DT（ABL 现场生成）
+根 compatible 是 `qcom,kona-mtp` + `qcom,kona`，**没有** `qcom,scm` 与
+`qcom,reboot-reason` 节点，因此不能复用四代（Elden）的 SCM + SPMI/SDAM 路径，改用
+**Kona IMEM 协议**（与 mainline `msm-poweroff.c` 一致）：
+
+| 目标 | 写入位置 | 值 |
+|---|---|---|
+| Recovery | IMEM `0x146bf65c`（`restart_reason`） | `0x77665502` |
+| Fastboot | IMEM `0x146bf65c`（`restart_reason`） | `0x77665500` |
+| EDL | —（暂不支持） | — |
+
+- 地址来自运行时 DT 的 `qcom,msm-imem-restart_reason` 子节点（`0x146bf65c`）；写入后
+  立即回读校验，校验失败会回滚原值。
+
+> **EDL（9008）为已知遗留问题（M1 fix 范围内不解决）**：早期尝试过 IMEM
+> `download_mode` cookie（基址 `+0x00`，属推断）、`dload_type`、SCM 安全下载
+> （`0xc2000110` 参数 `0x50`）与 TCSR 兜底，均未经验证且实机三轮都只重启回 Android。
+> 为避免保留未验证的推测代码，这些实现已全部移除；菜单的 9008 项仍保留，但会直接
+> 返回“不支持”（`-100`）。后续排查方向：反汇编 `xbl.elf` 确认其真正读取的 IMEM
+> 偏移（或 `misc` BCB），或改用硬件按键/EDL 线。
+- **复位必须是 PMIC 暖复位**：普通 PSCI `SYSTEM_RESET` 是硬复位，会清空 IMEM，bootloader
+  只能重新进 Android（前几轮实机三模式全部回 Android 已证实）。改用原厂
+  `qpnp-power-on` 的暖复位路径：SPMI SID 0（PM8150）的 PON 位于 `0x800`，
+  先写 PON 重启原因（`0x88F`，GEN2 从 bit1 起，Recovery=1、Fastboot=2），
+  再按下游顺序配置 `PS_HOLD_RST_CTL(0x85A)` / `PS_HOLD_RST_CTL2(0x85B)`：
+  清 `RESET_EN` → 延时 500µs → 类型写 `0x1`（warm）→ 置 `RESET_EN`，最后写
+  TCSR `PS_HOLD`（`0xC264000`，取自 `qcom,pshold`）为 0 触发；与下游一样先尝试
+  SCM `SCM_SVC_PWR/2`（TCSR 可能只允许安全世界写），调用返回后再直写兜底。
+- 只有 PON 路径不可用（SPMI 资源缺失、PON 子类型无效或寄存器写失败）时才退回
+  PSCI `SYSTEM_RESET2` → 普通 `SYSTEM_RESET`，保证设备至少能重启；此时屏上会显示
+  `-106` / `-107`。PON 配置成功后**绝不再触发硬复位**，以免清掉刚写入的 cookie。
+- Android-only 配置没有调试串口，失败时把数值码追加到状态栏，例如
+  `切换启动模式失败 (-104)`，这是唯一的现场反馈。
+
+| 码 | 含义 |
+|---|---|
+| -100 | 不支持（PSCI conduit 非 SMC） |
+| -101 | DT 无效（找不到 IMEM 地址） |
+| -102 | MMIO 读写失败 |
+| -103 | 写后回读校验失败 |
+| -104 | 复位调用返回（没有真正复位） |
+| -105 | 回滚失败 |
+| -106 | PON 暖复位不可用（SPMI 资源或 PON 探测失败），已回退 PSCI |
+| -107 | PON 寄存器写入/校验失败，已回退 PSCI |
+
+代码：`src/drivers/qcom_reboot.c`（IMEM 路径、复位回退）、`src/drivers/qcom_pon.c`
+（PM8150 PON 暖复位）、`src/include/qcom_reboot.h` / `qcom_pon.h`、
+`src/core/platform.c`（屏上状态码）。host 回归：`qcom_reboot_test`（含 PON 寄存器序列）、
+`platform_*`、`boot_settings_test`。
 
 ## 硬件调研（来自官方 dtbo overlay）
 
@@ -125,6 +178,14 @@ AVB 为未签名（Algorithm NONE），刷入分区需要解锁 bootloader。
 3. ~~进入原厂 Android 正常~~ → 8 秒超时或选择后正常进入。
 4. ~~菜单方向~~ → 原生竖屏 1600×2560 + `CONFIG_KSHIM_UI_ROTATION_CCW=270`，横屏正确。
 5. ~~设备信息页~~ → Board `Mi Pad 5 Pro (elish)`、SoC `SM8250`。
+
+M1 fix（高级启动动作，实机调试中）：
+
+6. Recovery / Fastboot / EDL 切换：PM8150 PON 暖复位（`qcom_pon.c`）**已实机验证**——
+   **Recovery / Fastboot 通过**（暖复位 + IMEM `restart_reason`），**EDL（9008）遗留**：
+   三轮尝试（SCM `0x50`、SCM `0x10`+`EDLOAD`、IMEM download_mode cookie）均只回 Android，
+   未验证的推测实现已移除，9008 菜单项返回“不支持”；待反汇编 `xbl.elf` 后另开课题。
+   失败时按 `-104/-106/-107` 显示。
 
 原厂 boot.img 备份与 sha256 全程记录在 `/tmp/opencode/elish/stock/SHA256SUMS`；不要把
 `~/Downloads/boot.img`（那是 TB322FC 的）与 elish 的混用。

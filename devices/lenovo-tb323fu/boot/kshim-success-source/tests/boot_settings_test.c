@@ -285,7 +285,9 @@ static void test_resolve_boundaries(void)
     assert(boot_settings_effective_board(&settings, (enum device_board)-1,
                                          &board) == BOOT_SETTINGS_INVALID);
     assert(board == DEVICE_BOARD_TB323FU);
-    assert(boot_settings_effective_board(&settings, (enum device_board)3,
+    /* One past the last valid board, so adding a board does not break this. */
+    assert(boot_settings_effective_board(&settings,
+                                         (enum device_board)(DEVICE_BOARD_ELISH + 1),
                                          &board) == BOOT_SETTINGS_INVALID);
     assert(board == DEVICE_BOARD_TB323FU);
     assert(boot_settings_effective_board(NULL, DEVICE_BOARD_UNKNOWN, &board) ==

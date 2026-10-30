@@ -167,6 +167,10 @@ CONFIG_REGULATOR_QCOM_LCDB=y             # MANGMI Air Y Pro panel bias
 CONFIG_BACKLIGHT_SY7758=y
 CONFIG_BACKLIGHT_ODIN2MINI=y
 CONFIG_BACKLIGHT_AW99706=y                # KONKR Pocket FIT Elite + Y700 Gen4
+# Xiaomi Pad 5 Pro (elish): the nt36523 panel has no DCS backlight, so it
+# probes with drm_panel_of_backlight() and defers until this provider exists.
+# Without it msm_drm never binds and the panel stays black (no fbcon either).
+CONFIG_BACKLIGHT_KTZ8866=y
 # =y not =m: a modular backlight PWM provider makes the panel bind late (from
 # the rootfs). Gated by LEDS_CLASS_MULTICOLOR, which must be =y too.
 CONFIG_LEDS_CLASS_MULTICOLOR=y

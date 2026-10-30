@@ -160,8 +160,39 @@ def main():
     ap.add_argument("--report", required=True)
     ap.add_argument("--avbtool", default=None)
     ap.add_argument("--dt-probe-report-slots", action="store_true")
+    ap.add_argument(
+        "--max-output-size", type=int, default=None,
+        help="maximum final boot image size in bytes; defaults to the original "
+             "image length (backward compatible). Use 201326592 for a 192 MiB "
+             "boot partition.")
+    ap.add_argument(
+        "--avb-partition-size", type=int, default=None,
+        help="exact avbtool partition_size/final file length; must be a "
+             "multiple of 4096 and fit within --max-output-size. Defaults to "
+             "the original image length. Mutually exclusive with --minimal-avb.")
+    ap.add_argument(
+        "--minimal-avb", action="store_true",
+        help="choose the smallest AVB partition_size that holds the repacked "
+             "content plus avbtool's maximum metadata reservation, instead of "
+             "padding to the original/stock length. Mutually exclusive with "
+             "--avb-partition-size.")
     a = ap.parse_args()
     diagnostic = a.dt_probe_report_slots
+
+    if a.minimal_avb and a.avb_partition_size is not None:
+        die("--minimal-avb and --avb-partition-size are mutually exclusive")
+    if a.max_output_size is not None and a.max_output_size <= 0:
+        die("--max-output-size must be positive")
+    if (a.max_output_size is not None
+            and a.max_output_size % 4096 != 0):
+        die("--max-output-size %d is not a multiple of %d"
+            % (a.max_output_size, 4096))
+    if a.avb_partition_size is not None and a.avb_partition_size <= 0:
+        die("--avb-partition-size must be positive")
+    if (a.avb_partition_size is not None
+            and a.avb_partition_size % 4096 != 0):
+        die("--avb-partition-size %d is not a multiple of %d"
+            % (a.avb_partition_size, 4096))
 
     if os.path.realpath(a.output) == os.path.realpath(a.report):
         die("output and report paths are the same")
@@ -172,6 +203,15 @@ def main():
 
     orig = read_file(a.original, "original")
     kern = read_file(a.kernel, "kernel")
+
+    limit = len(orig) if a.max_output_size is None else a.max_output_size
+    if limit < len(orig):
+        die("--max-output-size %d is smaller than the original image length %d"
+            % (limit, len(orig)))
+    if (a.avb_partition_size is not None
+            and a.avb_partition_size > limit):
+        die("--avb-partition-size %d exceeds --max-output-size %d"
+            % (a.avb_partition_size, limit))
 
     if len(orig) < HDR:
         die("original smaller than 4096 bytes")
@@ -209,8 +249,8 @@ def main():
     if diagnostic and not footer_present:
         die("--dt-probe-report-slots requires an AVB footer in the original")
     avb = {"footer_present": footer_present}
-    limit = len(orig)
     avb_source = None
+    avb_reserve = 0
     mod = None
     hash_cls = None
     prop_cls = None
@@ -310,6 +350,27 @@ def main():
             "rollback_index_location": avb_source["rollback_index_location"],
             "properties": [k for k, _ in props],
         }
+
+        # avbtool reserves a fixed amount of partition space for the vbmeta
+        # blob/footer; ask the official tool for the reservation at the output
+        # limit so --minimal-avb can pick the smallest safe partition size.
+        max_run = run_avbtool(a.avbtool, [
+            "add_hash_footer",
+            "--partition_size", str(limit),
+            "--calc_max_image_size",
+        ])
+        if max_run.returncode != 0:
+            die("avbtool --calc_max_image_size failed: %s"
+                % (max_run.stderr.strip() or max_run.stdout.strip()))
+        try:
+            max_payload = int(max_run.stdout.strip().splitlines()[-1].strip())
+        except (ValueError, IndexError):
+            die("could not parse avbtool --calc_max_image_size output: %r"
+                % max_run.stdout)
+        avb_reserve = limit - max_payload
+        if avb_reserve <= 0:
+            die("avbtool reported no AVB metadata reservation for %d bytes"
+                % limit)
     else:
         if a.avbtool:
             die("--avbtool was provided but the original has no AVB footer "
@@ -336,8 +397,33 @@ def main():
     # v3 reconstruction: header + page-aligned kernel + page-aligned ramdisk.
     new_len = HDR + align(len(kern)) + rs
     aligned = align(new_len)
-    if aligned > limit:
-        die("repacked image %d exceeds partition limit %d" % (aligned, limit))
+
+    # Output size policy:
+    #   default                -> original image length (v1-compatible)
+    #   --avb-partition-size N -> exact partition size / final file length
+    #   --minimal-avb          -> content + avbtool's metadata reservation
+    if avb_source is None and (a.minimal_avb or a.avb_partition_size is not None):
+        die("--minimal-avb/--avb-partition-size requires an AVB footer in the "
+            "original image")
+    if avb_source is None:
+        target = limit
+        if aligned > target:
+            die("repacked image %d exceeds partition limit %d"
+                % (aligned, target))
+    else:
+        if a.minimal_avb:
+            target = align(aligned + avb_reserve)
+        elif a.avb_partition_size is not None:
+            target = a.avb_partition_size
+        else:
+            target = limit
+        if target > limit:
+            die("repacked image %d exceeds partition limit %d"
+                % (target, limit))
+        max_payload = target - avb_reserve
+        if aligned > max_payload:
+            die("repacked image %d exceeds avbtool max payload %d "
+                "for partition size %d" % (aligned, max_payload, target))
 
     header = bytearray(orig[:HDR])
     struct.pack_into("<I", header, 8, len(kern))
@@ -374,24 +460,6 @@ def main():
     if len(raw) >= 64 and raw[-64:-60] == b"AVBf":
         die("output unexpectedly ends with an AVB footer")
 
-    if avb_source is not None:
-        max_run = run_avbtool(a.avbtool, [
-            "add_hash_footer",
-            "--partition_size", str(len(orig)),
-            "--calc_max_image_size",
-        ])
-        if max_run.returncode != 0:
-            die("avbtool --calc_max_image_size failed: %s"
-                % (max_run.stderr.strip() or max_run.stdout.strip()))
-        try:
-            max_payload = int(max_run.stdout.strip().splitlines()[-1].strip())
-        except (ValueError, IndexError):
-            die("could not parse avbtool --calc_max_image_size output: %r"
-                % max_run.stdout)
-        if aligned > max_payload:
-            die("repacked image %d exceeds avbtool max payload %d"
-                % (aligned, max_payload))
-
     owned = False
     final_len = len(raw)
     try:
@@ -403,7 +471,7 @@ def main():
             args = [
                 "add_hash_footer",
                 "--image", a.output,
-                "--partition_size", str(len(orig)),
+                "--partition_size", str(target),
                 "--partition_name", "boot",
                 "--algorithm", "NONE",
                 "--hash_algorithm", avb_source["hash_algorithm"],
@@ -423,9 +491,9 @@ def main():
 
             final = read_file(a.output, "output")
             final_len = len(final)
-            if final_len != len(orig):
-                die("final output length %d != original partition length %d"
-                    % (final_len, len(orig)))
+            if final_len != target:
+                die("final output length %d != partition size %d"
+                    % (final_len, target))
             if final[:len(raw)] != raw:
                 die("final output data prefix differs from expected raw image")
 
@@ -477,6 +545,7 @@ def main():
             "avb": {
                 "footer_present": avb_source is not None,
                 "metadata_algorithm": "NONE" if avb_source is not None else None,
+                "partition_size": target if avb_source is not None else None,
             },
             "warning": "requires unlocked bootloader; hardware untested",
         }

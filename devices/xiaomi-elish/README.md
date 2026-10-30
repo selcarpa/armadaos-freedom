@@ -1,14 +1,15 @@
 # 小米平板 5 Pro（elish）
 
 ArmadaOS Freedom 为小米平板 5 Pro（elish / SM8250）提供 kShimC 多系统启动适配。本页记录
-elish 的适配状态、硬件调研与构建入口。当前以 Android-only 启动菜单（M1）为主要里程碑。
+elish 的适配状态、硬件调研与构建入口。M1（Android-only 启动菜单）已实机验证；M2（机身 Linux
+maintenance boot）离线完成，等待实机验收。
 
 | 项目 | 配置 |
 |---|---|
 | 型号 | Xiaomi Pad 5 Pro（elish，BOE / CSOT 两种面板） |
 | SoC | Qualcomm SM8250（Kona） |
 | 设备树标识 | 运行时 ABL DT：`qcom,kona-mtp` + model `… xiaomi elish`；mainline DTS：`xiaomi,elish`、`qcom,sm8250` |
-| boot 头版本 | **v3**（header_size 1580，128 MiB 分区） |
+| boot 头版本 | **v3**（header_size 1580；`boot_a/b` 分区 192 MiB，原厂镜像 128 MiB） |
 | 内核 | ArmadaOS Freedom 统一 Linux 7.2.6（mainline 已含 elish DTS 与 nt36523 面板驱动） |
 | runtime 配置 | `elish_defconfig`（kShimC 共享源码树） |
 | 系统更新 | 尚未接入（`armada-kshim-sync` 仅匹配四代 Elden） |
@@ -26,7 +27,7 @@ elish 的适配状态、硬件调研与构建入口。当前以 Android-only 启
 | EDL / 9008 | **已知遗留**：菜单项保留，但直接返回“不支持”（`-100`），见下节 |
 | 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
-| 机身 Linux（M2） | 统一内核已重建，`sm8250-xiaomi-elish-{boe,csot}.dtb` 已进产物并含 handoff 适配 |
+| 机身 Linux（M2） | **离线验证 PASS**：5 条目 maintenance boot（csot/boe）+ 最小 canary initramfs，249 项检查；实机待验证，`hardware_tested: false`（见下节） |
 
 ## 显示与设备信息（M1 已验证）
 
@@ -257,9 +258,88 @@ M1 fix（高级启动动作，已实机验证；EDL 除外）：
 必须全量重建**（当前 series 末尾的 Kaanapali/Baldur 补丁 0209–0223 未在旧 FAST 缓存树上应用，
 `FAST=1` 复用会在 config merge 阶段因 `CONFIG_LEDS_AW22127` 缺失而失败）。
 
+## 机身 Linux（M2）
+
+M2 在单个 v3 `boot.img` 里同时保留原厂 Android 与 Linux 维护入口（5 条目），用于验证
+kShimC → Linux → userspace 链路；本阶段不安装 rootfs，不接管 UFS。
+
+### 布局与产物
+
+| # | 名称 | 类型 | 说明 |
+|---|---|---|---|
+| 0 | 原厂 Android | Linux（BASE） | 原厂内核 Image，保留在 slot 0 |
+| 1 | Linux 维护模式 | Linux + HAS_DTB | 统一内核 `vmlinuz`，`DeviceTreeBlob=Image-02` |
+| 2 | Elish DTB | DTB | 由 mainline DTB 派生：写入 `chosen/bootargs` 与 `chosen/kshim,initrd-entry` |
+| 3 | M2 initramfs | Blob | 最小 canary initramfs |
+| 4 | Attached Shim | Shim | 4 MiB `kShimC.bin`，由 packer 自动追加 |
+
+默认条目 `Image-01`（Linux 维护模式），超时 8000 ms；Android 仍在菜单中可选。原厂 ramdisk
+由 v3 repacker 字节级保留，Android 经 ABL 的 `/chosen linux,initrd-*` 找到它。
+
+当前离线产物（`hardware_tested: false`）：
+
+- `boot-csot.img` / `boot-boe.img`：157,024,256 B，`report.json` 249 项检查全 PASS；
+- `initramfs.cpio.gz`：259,816 B，静态 aarch64 `init` 在 framebuffer 上画彩条后常驻；
+- `initramfs-debug.cpio.gz`：261,409 B，额外提供 USB ACM 串口与 `armada.reboot_after=<秒>`；
+- `boot-csot-debug.img`（`loglevel=8 drm.debug=0x1e`）与 `boot-csot-probe30.img`
+  （30 秒自动重启），用于实机试错。
+
+### 构建
+
+```sh
+# 1) runtime：必须用当前源码重建，产物必须恰好 4 MiB
+cd devices/lenovo-tb323fu/boot/kshim-success-source
+python3 tools/build_runtime.py --config configs/elish_defconfig --out <runtime> --jobs 8
+
+# 2) packer / unpacker（本机即可，无需 ARM64）
+cmake -S packages/kshim-tools/vendor/packer -B <packer-build> -DBUILD_SHIMS=OFF
+cmake --build <packer-build> --parallel
+
+# 3) 最小 initramfs（canary；--source .../init-debug.c 生成 debug 版）
+python3 devices/xiaomi-elish/boot/build_min_initramfs.py --out <initrd>/initramfs.cpio.gz
+
+# 4) 5 条目 maintenance boot（BOE 换 --dtb 与 --panel）
+python3 devices/xiaomi-elish/boot/build_linux_boot_v3.py \
+  --stock-boot <128 MiB 原厂 boot.img> \
+  --linux-image <kernel>/vmlinuz \
+  --dtb <kernel>/dtb/qcom/sm8250-xiaomi-elish-csot.dtb \
+  --initrd <initrd>/initramfs.cpio.gz \
+  --bootargs "console=ttyMSM0,115200n8 earlycon rdinit=/init loglevel=7" \
+  --runtime <runtime>/kShimC.bin \
+  --packer <packer-build>/MultiBootKernelPatcher \
+  --unpacker <packer-build>/UnpackTool \
+  --avbtool packages/kshim-tools/vendor/avbtool.py \
+  --panel csot --raw-profile xbl-evidence --max-output-size 201326592 \
+  --output-name boot-csot.img --out <out-csot> --source-label elish-m2-csot-v1
+```
+
+### 尺寸与限制
+
+- 打包内核 137,099,400 B **超过**保守 128 MiB loader 预算，必须显式
+  `--raw-profile xbl-evidence`。192 MiB profile 来自 XBL memory map 的
+  `0xA0000000,0x10000000,"Kernel"` 256 MiB reservation，是证据而非实测。
+- 输出 157,024,256 B；`boot_a/b` 分区实际 192 MiB（原厂镜像只有 128 MiB）。
+- `repack_boot_v3.py` 的 `--minimal-avb` 把 AVB footer 放在真实内容末尾（分区长度取整），
+  `--pad-to-max-output` 则填充到 192 MiB；两者互斥。
+- AVB 为 `NONE`（未签名），刷分区需已解锁 bootloader；M2 阶段只 `fastboot boot`。
+
+### 实机验证（待做）
+
+```sh
+fastboot boot <out-csot>/boot-csot.img    # 157 MB < 192 MiB 分区
+```
+
+判据：屏上出现彩条 canary = kShimC → Linux → userspace 全链路通过。黑屏先换
+`boot-boe.img`，仍黑屏则用 `boot-csot-probe30.img` / `boot-csot-debug.img`，后者可从
+USB ACM 串口读取 `ARMADA-ELISH-M2-CANARY` 日志。`fastboot reboot` 即回原厂 boot。
+
+> 2026-10-26 的离线产物使用的 shim 是 `54891ac…`（M1 fix 之前的源码，仍含后来移除的 EDL
+> 探测）；2026-10-30 用当前 HEAD 重建为 `67de37fb…`，本页数据均按新 runtime 记录。
+
 ## 后续里程碑
 
-- M2 机身 Linux：vmlinuz + elish DTB + initramfs，Linux maintenance boot（5 条目）。
+- ~~M2 机身 Linux~~：vmlinuz + elish DTB + initramfs、5 条目 maintenance boot 已完成离线
+  验证；待 `fastboot boot` 实机验收（见「机身 Linux（M2）」）。
 - M3 触屏：Novatek NVT SPI 驱动接入（参照 0140/0164–0167）+ runtime 触屏 + 桌面校准 + 笔。
 - M4 音频：CS35L41 ×4 + WCD938x 在 sm8250-sndcard 布线 + ALSA UCM。
 - M5 充电/电量（双电芯）、WiFi/BT、相机节点、安装流程与 OTA（`armada-kshim-sync` 需按

@@ -10,8 +10,8 @@
 > W4 实机：首版内核进 Linux 后黑屏；用 timing/probe 镜像确认内核与 initramfs 正常（20 s
 > 自动重启），定位为缺 `CONFIG_BACKLIGHT_KTZ8866`（nt36523 面板 `drm_panel_of_backlight()`
 > 永久 `-EPROBE_DEFER`）。补编内核后 `boot-ktz-csot.img` 在 CSOT 实机点亮，彩条 + fbcon
-> 文字验证通过；Android base 回退仍待确认。产物在 `_build/elish-m2/`（`.gitignore` 的
-> `_build*`，不入库）。
+> 文字验证通过；同镜像菜单回选原厂 Android 也正常启动，M2 验收完成。产物在
+> `_build/elish-m2/`（`.gitignore` 的 `_build*`，不入库）。
 
 ## 1. 范围与验收
 

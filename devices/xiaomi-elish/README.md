@@ -27,7 +27,7 @@ maintenance boot）离线完成，等待实机验收。
 | EDL / 9008 | **已知遗留**：菜单项保留，但直接返回“不支持”（`-100`），见下节 |
 | 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
-| 机身 Linux（M2） | **实机验证通过（显示链路）**：CSOT canary 彩条 + fbcon 文字；KTZ8866 背光驱动修复；Android 回退待验证（见下节） |
+| 机身 Linux（M2） | **实机验证通过**：CSOT canary 彩条 + fbcon 文字；原厂 Android 回退正常；KTZ8866 背光驱动修复（见下节） |
 
 ## 显示与设备信息（M1 已验证）
 
@@ -339,8 +339,8 @@ fastboot boot _build/elish-m2/ktz-csot/boot-ktz-csot.img
 正常（`armada.reboot_after=20` 会按时重启），但屏幕全黑、无 fbcon、无彩条。修复提交
 `e8c579b`（`packages/kernel/config/armada-kernel.config.overrides`）。
 
-待确认：菜单回选「原厂 Android」确认 base 仍可启动；BOE 面板机器改用
-`boot-ktz-boe.img`。
+Android 回退已验证：同一镜像在菜单里回选「原厂 Android」可正常启动，说明 base 入口与
+原厂 ramdisk 未被破坏。BOE 面板机器改用 `boot-ktz-boe.img`。
 
 > 2026-10-26 的离线产物使用的 shim 是 `54891ac…`（M1 fix 之前的源码，仍含后来移除的 EDL
 > 探测）；2026-10-30 用当前 HEAD 重建为 `67de37fb…`，本页数据均按新 runtime 记录。
@@ -348,7 +348,8 @@ fastboot boot _build/elish-m2/ktz-csot/boot-ktz-csot.img
 ## 后续里程碑
 
 - ~~M2 机身 Linux~~：5 条目 maintenance boot 已完成离线验证，并在 CSOT 实机上验证
-  kShimC → Linux → canary 显示链路；待确认 Android base 回退（见「机身 Linux（M2）」）。
+  kShimC → Linux → canary 显示链路与原厂 Android 回退。下一步 M3 触屏（见
+  [M3-PLAN.md](docs/M3-PLAN.md)）。
 - M3 触屏：Novatek NVT SPI 驱动接入（参照 0140/0164–0167）+ runtime 触屏 + 桌面校准 + 笔。
 - M4 音频：CS35L41 ×4 + WCD938x 在 sm8250-sndcard 布线 + ALSA UCM。
 - M5 充电/电量（双电芯）、WiFi/BT、相机节点、安装流程与 OTA（`armada-kshim-sync` 需按

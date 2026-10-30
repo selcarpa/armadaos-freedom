@@ -27,7 +27,7 @@ maintenance boot）离线完成，等待实机验收。
 | EDL / 9008 | **已知遗留**：菜单项保留，但直接返回“不支持”（`-100`），见下节 |
 | 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
-| 机身 Linux（M2） | **离线验证 PASS**：5 条目 maintenance boot（csot/boe）+ 最小 canary initramfs，249 项检查；实机待验证，`hardware_tested: false`（见下节） |
+| 机身 Linux（M2） | **实机验证通过（显示链路）**：CSOT canary 彩条 + fbcon 文字；KTZ8866 背光驱动修复；Android 回退待验证（见下节） |
 
 ## 显示与设备信息（M1 已验证）
 
@@ -323,23 +323,32 @@ python3 devices/xiaomi-elish/boot/build_linux_boot_v3.py \
   `--pad-to-max-output` 则填充到 192 MiB；两者互斥。
 - AVB 为 `NONE`（未签名），刷分区需已解锁 bootloader；M2 阶段只 `fastboot boot`。
 
-### 实机验证（待做）
+### 实机验证（2026-10-30）
 
 ```sh
-fastboot boot <out-csot>/boot-csot.img    # 157 MB < 192 MiB 分区
+fastboot boot _build/elish-m2/ktz-csot/boot-ktz-csot.img
 ```
 
-判据：屏上出现彩条 canary = kShimC → Linux → userspace 全链路通过。黑屏先换
-`boot-boe.img`，仍黑屏则用 `boot-csot-probe30.img` / `boot-csot-debug.img`，后者可从
-USB ACM 串口读取 `ARMADA-ELISH-M2-CANARY` 日志。`fastboot reboot` 即回原厂 boot。
+结果：菜单 8 s 后自动进入 Linux，CSOT 面板显示 **上红 / 中绿 / 下蓝三条横带 + 中央白色
+方块**，左上角 fbcon 输出 `ARMADA-ELISH-M2-CANARY: framebuffer canary active: idling`。
+即 kShimC → Linux 内核 → initramfs `/init` → `/dev/fb0` 全链路通过。
+
+根因记录：首版内核没有编 `CONFIG_BACKLIGHT_KTZ8866`。elish 的 nt36523 面板不是 DCS
+背光，probe 时走 `drm_panel_of_backlight()`；缺少 KTZ8866 provider 会返回
+`-EPROBE_DEFER`，panel 永远不 ready，`msm_drm` 永远不 bind。症状是内核与 initramfs 都
+正常（`armada.reboot_after=20` 会按时重启），但屏幕全黑、无 fbcon、无彩条。修复提交
+`e8c579b`（`packages/kernel/config/armada-kernel.config.overrides`）。
+
+待确认：菜单回选「原厂 Android」确认 base 仍可启动；BOE 面板机器改用
+`boot-ktz-boe.img`。
 
 > 2026-10-26 的离线产物使用的 shim 是 `54891ac…`（M1 fix 之前的源码，仍含后来移除的 EDL
 > 探测）；2026-10-30 用当前 HEAD 重建为 `67de37fb…`，本页数据均按新 runtime 记录。
 
 ## 后续里程碑
 
-- ~~M2 机身 Linux~~：vmlinuz + elish DTB + initramfs、5 条目 maintenance boot 已完成离线
-  验证；待 `fastboot boot` 实机验收（见「机身 Linux（M2）」）。
+- ~~M2 机身 Linux~~：5 条目 maintenance boot 已完成离线验证，并在 CSOT 实机上验证
+  kShimC → Linux → canary 显示链路；待确认 Android base 回退（见「机身 Linux（M2）」）。
 - M3 触屏：Novatek NVT SPI 驱动接入（参照 0140/0164–0167）+ runtime 触屏 + 桌面校准 + 笔。
 - M4 音频：CS35L41 ×4 + WCD938x 在 sm8250-sndcard 布线 + ALSA UCM。
 - M5 充电/电量（双电芯）、WiFi/BT、相机节点、安装流程与 OTA（`armada-kshim-sync` 需按

@@ -18,14 +18,14 @@ maintenance boot）离线完成，等待实机验收。
 
 | 功能 | 当前状态 |
 |---|---|
-| Android-only boot 打包（v3） | 离线验证 PASS（128 项检查），`hardware_tested: false` |
+| Android-only boot 打包（v3） | 离线验证 PASS（128 项检查）；M1 菜单与原厂 Android 实机已验证 |
 | kShimC 启动菜单 | **实机验证通过**：全屏横屏菜单、音量/电源键可选、超时进 Android |
 | 原厂 Android 启动 | **实机验证通过**（ramdisk 字节保留，经 `linux,initrd-*` 传递） |
 | 显示 | **实机验证通过**：原生竖屏 1600×2560 + `CONFIG_KSHIM_UI_ROTATION_CCW=270`（见下节） |
 | 设备信息页 | **实机验证通过**：Board `Mi Pad 5 Pro (elish)`、SoC `SM8250` |
 | 高级启动动作 Recovery / Fastboot（M1 fix） | **实机验证通过**：PM8150 PON 暖复位 + IMEM `restart_reason`（见下节） |
 | EDL / 9008 | **已知遗留**：菜单项保留，但直接返回“不支持”（`-100`），见下节 |
-| 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔），待驱动接入 |
+| 触屏 | 调研完成：Novatek NVT SPI（`novatek,NVT-ts-spi`，QUP4 SPI，GPIO39 中断，带手写笔）；M3 暂停，见 [M3-PLAN.md](docs/M3-PLAN.md) |
 | 音频 | 调研完成：WCD938x + 4× Cirrus CS35L41（I2C 0x40/41/42/43），待布线 |
 | 机身 Linux（M2） | **实机验证通过**：CSOT canary 彩条 + fbcon 文字；原厂 Android 回退正常；KTZ8866 背光驱动修复（见下节） |
 
@@ -276,7 +276,7 @@ kShimC → Linux → userspace 链路；本阶段不安装 rootfs，不接管 UF
 默认条目 `Image-01`（Linux 维护模式），超时 8000 ms；Android 仍在菜单中可选。原厂 ramdisk
 由 v3 repacker 字节级保留，Android 经 ABL 的 `/chosen linux,initrd-*` 找到它。
 
-当前离线产物（`hardware_tested: false`）：
+产物（`report.json` 按设计记录 `hardware_tested: false`；实机结果见下节）：
 
 - `boot-csot.img` / `boot-boe.img`：157,024,256 B，`report.json` 249 项检查全 PASS；
 - `initramfs.cpio.gz`：259,816 B，静态 aarch64 `init` 在 framebuffer 上画彩条后常驻；

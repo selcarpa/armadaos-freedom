@@ -348,9 +348,9 @@ Android 回退已验证：同一镜像在菜单里回选「原厂 Android」可�
 ## 后续里程碑
 
 - ~~M2 机身 Linux~~：5 条目 maintenance boot 已完成离线验证，并在 CSOT 实机上验证
-  kShimC → Linux → canary 显示链路与原厂 Android 回退。下一步 M3 触屏（见
-  [M3-PLAN.md](docs/M3-PLAN.md)）。
-- M3 触屏：Novatek NVT SPI 驱动接入（参照 0140/0164–0167）+ runtime 触屏 + 桌面校准 + 笔。
+  kShimC → Linux → canary 显示链路与原厂 Android 回退。
+- M3 触屏（**暂停**）：Novatek NVT SPI 驱动接入 + runtime 触屏 + 桌面校准 + 笔；调研与
+  后续步骤见 [M3-PLAN.md](docs/M3-PLAN.md)，实验代码保留在分支 `wip/elish-m3`。
 - M4 音频：CS35L41 ×4 + WCD938x 在 sm8250-sndcard 布线 + ALSA UCM。
 - M5 充电/电量（双电芯）、WiFi/BT、相机节点、安装流程与 OTA（`armada-kshim-sync` 需按
   `xiaomi,elish` 匹配）。

@@ -4,6 +4,13 @@
 > 前置：M2 已完成（5 条目 maintenance boot，CSOT 显示链路 + 原厂 Android 回退均实机通过）。
 > 依据：[设备 README](../README.md)、官方 dtbo overlay、`nt36536` 内核驱动与 0164–0167
 > 补丁、`device-env` / 桌面校准框架、kShimC runtime touch 代码。
+>
+> **收束记录（2026-11-02）**：M3 暂停，`port/elish` 已回到 M2 完成态，仅保留本计划。
+> 已完成的实验代码（触摸 DTS 节点、NT36536 built-in、evdev 测试 init、设备档案、0224/0225
+> 中断补丁）完整保留在分支 `wip/elish-m3`（HEAD `4e81648`）。
+> 已确认：SPI 能完成 chip trim/probe、GPIO39 为输入且低有效，但触摸事件仍未上报；
+> 续做时优先验证 active-low IRQ（`IRQ_TYPE_LEVEL_LOW` / `EDGE_FALLING`）或从设备侧取
+> `novatek_ts_fw_k81.bin` 做 host-download。
 
 ## 1. 目标与验收
 
